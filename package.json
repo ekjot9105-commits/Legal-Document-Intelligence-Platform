@@ -1,0 +1,17 @@
+{
+  "name": "legal-document-intelligence-platform",
+  "version": "1.0.0",
+  "description": "Full-stack legal-tech GenAI platform",
+  "private": true,
+  "scripts": {
+    "dev:frontend": "npm run dev --prefix frontend",
+    "dev:backend": "cd backend && uv run uvicorn app.main:app --reload",
+    "test:frontend": "npm run test --prefix frontend",
+    "test:backend": "cd backend && uv run pytest",
+    "lint:frontend": "npm run lint --prefix frontend",
+    "lint:backend": "cd backend && uv run ruff check . && uv run black --check ."
+  },
+  "workspaces": [
+    "frontend"
+  ]
+}
