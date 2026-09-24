@@ -3,6 +3,9 @@ import type { ChangeEvent, CSSProperties, ReactNode, RefObject } from 'react'
 import type { DocumentRecord } from './types'
 import { validateUploadFile } from './lib/uploadSecurity'
 import { downloadLawyerBrief } from './lib/lawyerBrief'
+import { askDocuments, compareDocuments as compareDocumentsApi, getClauses, listDocuments, uploadDocument } from './lib/api'
+import type { BackendClause, BackendDocument } from './lib/api'
+import BackendCompare from './components/BackendCompare'
 import './App.css'
 
 const DocumentScene = lazy(() => import('./components/DocumentScene'))
@@ -33,6 +36,15 @@ const navItems: { id: View; label: string; icon: string }[] = [
   { id: 'overview', label: 'Overview', icon: '⌂' }, { id: 'documents', label: 'Documents', icon: '▤' }, { id: 'analysis', label: 'Clause intelligence', icon: '◈' }, { id: 'compare', label: 'Compare versions', icon: '⇄' }, { id: 'qa', label: 'Ask your documents', icon: '◌' }, { id: 'actions', label: 'Action plan', icon: '✓' }, { id: 'privacy', label: 'Trust & privacy', icon: '◇' },
 ]
 
+function mapBackendDocument(document: BackendDocument): IntelligenceDocument {
+  return { id: document.id, filename: document.filename, uploadedAt: 'Just now', status: document.status, ownerId: document.owner_id, classification: document.classification ?? 'Legal document', storagePath: `/api/documents/${document.id}`, pages: document.pages, clauses: 0, risk: 'Low', folder: 'New uploads', version: 1, language: 'English' }
+}
+
+function mapBackendClause(clause: BackendClause): Clause {
+  const citation = clause.citation.page ? `Page ${clause.citation.page}` : clause.citation.paragraph ? `Paragraph ${clause.citation.paragraph}` : 'Source clause'
+  return { id: clause.id, type: clause.type, title: clause.title, source: clause.source_text, simple: clause.simplified_text, citation, risk: clause.risk_level === 'high' ? 'High' : clause.risk_level === 'medium' ? 'Medium' : 'Low', confidence: Math.round(clause.confidence_score * 100), section: clause.citation.section ?? '—' }
+}
+
 function App() {
   const [view, setView] = useState<View>('overview')
   const [documents, setDocuments] = useState(starterDocuments)
@@ -54,6 +66,7 @@ function App() {
   const [profile, setProfile] = useState('New to law')
   const [level, setLevel] = useState('Simple')
   const [language, setLanguage] = useState('English')
+  const [backendReady, setBackendReady] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const selected = documents.find((doc) => doc.id === selectedId) ?? documents[0]
@@ -62,22 +75,35 @@ function App() {
 
   useEffect(() => { if (reducedMotion) return; const timer = window.setTimeout(() => setSceneEnabled(true), 700); return () => window.clearTimeout(timer) }, [reducedMotion])
   useEffect(() => { if (!toast) return; const timer = window.setTimeout(() => setToast(''), 3000); return () => window.clearTimeout(timer) }, [toast])
+  useEffect(() => { let mounted = true; void listDocuments().then(async (items) => { if (!mounted) return; setBackendReady(items.length > 0); if (items.length === 0) return; const mapped = items.map(mapBackendDocument); setDocuments(mapped); setSelectedId(mapped[0].id); const extracted = await getClauses(mapped[0].id).catch(() => []); if (mounted && extracted.length > 0) setClauses(extracted.map(mapBackendClause)) }).catch(() => undefined); return () => { mounted = false } }, [])
+  useEffect(() => { if (!backendReady || view !== 'compare' || documents.length < 2) return; void compareDocumentsApi(documents[0].id, documents[1].id).catch(() => undefined) }, [backendReady, documents, view])
 
   const notify = (message: string) => setToast(message)
-  const openDocument = (id: string, destination: View = 'analysis') => { setSelectedId(id); setView(destination) }
+  const openDocument = (id: string, destination: View = 'analysis') => { setSelectedId(id); setView(destination); if (backendReady && destination === 'analysis') void getClauses(id).then((items) => setClauses(items.map(mapBackendClause))).catch(() => undefined) }
   const handleUpload = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     if (!file) return
     const validation = await validateUploadFile(file)
     if (!validation.ok) { notify(validation.message); return }
     const extension = validation.extension
+    try {
+      const backendDocument = await uploadDocument(file)
+      setDocuments((current) => [mapBackendDocument(backendDocument), ...current])
+      setSelectedId(backendDocument.id)
+      setShowUpload(false)
+      setView('documents')
+      notify('Document uploaded. Backend analysis is ready.')
+      return
+    } catch {
+      notify('Backend unavailable. Continuing in local demo mode.')
+    }
     const newDocument: IntelligenceDocument = { id: `doc-${Date.now()}`, filename: file.name, uploadedAt: 'Just now', status: 'processing', ownerId: 'demo-user', classification: 'Classifying document', storagePath: '/vault/pending', pages: 0, clauses: 0, risk: 'Low', folder: 'New uploads', version: 1, language: 'English' }
     setDocuments((current) => [newDocument, ...current]); setSelectedId(newDocument.id); setShowUpload(false); setView('documents'); notify('Upload accepted. Classification and extraction started.')
     window.setTimeout(() => setDocuments((current) => current.map((doc) => doc.id === newDocument.id ? { ...doc, status: 'ready', classification: extension === 'docx' ? 'Master services agreement' : extension === 'txt' ? 'Legal text document' : 'Legal agreement', pages: 12, clauses: 19, storagePath: `/vault/${newDocument.id}` } : doc)), 1400)
   }
   const toggleBookmark = (id: string) => setClauses((current) => current.map((clause) => clause.id === id ? { ...clause, bookmarked: !clause.bookmarked } : clause))
   const saveNote = () => { if (!showNote || !noteText.trim()) return; setNotes((current) => [...current, { id: `${Date.now()}`, clause: showNote, text: noteText.trim() }]); setNoteText(''); setShowNote(null); notify('Private note saved to this workspace.') }
-  const askQuestion = (value = question) => { const prompt = value.trim(); if (!prompt) return; setQuestion(prompt); const unsupported = /unrelated|criminal|win|guarantee|tax/i.test(prompt); setAnswer(unsupported ? { text: 'This document does not contain enough information to answer that reliably. Consider discussing the question with a qualified legal professional.', citation: 'Unsupported question · no source clause found', grounded: false } : { text: 'You must provide written notice at least 60 days before termination. The agreement also renews for another year unless notice is sent before expiry.', citation: 'Sections 9.2 and 9.4 · Pages 8', grounded: true }); }
+  const askQuestion = async (value = question) => { const prompt = value.trim(); if (!prompt) return; setQuestion(prompt); if (backendReady) { try { const response = await askDocuments(prompt, [selectedId]); setAnswer({ text: response.answer, citation: response.cited_clause_ids.length ? `Source clauses: ${response.cited_clause_ids.join(', ')}` : 'Unsupported question · no source clause found', grounded: response.groundedness === 'grounded' }); return } catch { notify('Backend could not answer. Using the local demo response.') } } const unsupported = /unrelated|criminal|win|guarantee|tax/i.test(prompt); setAnswer(unsupported ? { text: 'This document does not contain enough information to answer that reliably. Consider discussing the question with a qualified legal professional.', citation: 'Unsupported question · no source clause found', grounded: false } : { text: 'You must provide written notice at least 60 days before termination. The agreement also renews for another year unless notice is sent before expiry.', citation: 'Sections 9.2 and 9.4 · Pages 8', grounded: true }); }
   const exportReport = async () => { await downloadLawyerBrief(selected, clauses); notify('PDF lawyer brief exported.') }
 
   return <div className={dark ? 'app-shell dark-theme' : 'app-shell'}>
@@ -87,7 +113,7 @@ function App() {
         {view === 'overview' && <Overview documents={documents} selected={selected} clauses={clauses} sceneEnabled={sceneEnabled} reducedMotion={reducedMotion} openDocument={openDocument} openUpload={() => setShowUpload(true)} setView={setView} />}
         {view === 'documents' && <Documents documents={visibleDocuments} selectedId={selectedId} search={search} setSearch={setSearch} openDocument={openDocument} openUpload={() => setShowUpload(true)} />}
         {view === 'analysis' && <Analysis selected={selected} clauses={visibleClauses} filter={filter} setFilter={setFilter} profile={profile} setProfile={setProfile} level={level} setLevel={setLevel} language={language} setLanguage={setLanguage} toggleBookmark={toggleBookmark} setShowNote={setShowNote} notes={notes} openDocument={openDocument} exportReport={exportReport} />}
-        {view === 'compare' && <Compare documents={documents} notify={notify} />}
+        {view === 'compare' && <BackendCompare documents={documents} notify={notify} />}
         {view === 'qa' && <QA question={question} answer={answer} setQuestion={setQuestion} askQuestion={askQuestion} />}
         {view === 'actions' && <Actions clauses={clauses} exportReport={exportReport} notify={notify} />}
         {view === 'privacy' && <Privacy reducedMotion={reducedMotion} setReducedMotion={setReducedMotion} dark={dark} setDark={setDark} />}
@@ -134,3 +160,4 @@ function Metric({ value, label, detail }: { value: string; label: string; detail
 function DocumentCard({ doc, open }: { doc: IntelligenceDocument; open: () => void }) { return <button className="document-card" onClick={open}><div className="card-icon">{doc.filename.endsWith('.docx') ? 'W' : 'PDF'}</div><div className="card-top"><span className="status ready"><i /> Ready</span><span>•••</span></div><strong>{doc.filename}</strong><span>{doc.classification}</span><div className="card-bottom"><small>{doc.pages} pages · {doc.clauses} clauses</small><b className={doc.risk.toLowerCase()}>{doc.risk} attention</b></div></button> }
 function RiskScore({ clauses, openScorecard }: { clauses: Clause[]; openScorecard: () => void }) { const score = Math.max(48, 100 - clauses.filter((clause) => clause.risk === 'High').length * 12 - clauses.filter((clause) => clause.risk === 'Medium').length * 4); return <div className="risk-score"><div className="score-ring" style={{ '--score': `${score * 3.6}deg` } as CSSProperties}><strong>{score}</strong><span>attention<br />score</span></div><div><strong>Contract intelligence scorecard</strong><p>{clauses.filter((clause) => clause.risk === 'High').length} high-attention clauses · 1 missing clause flag · 0 unresolved contradictions</p><button className="text-button" onClick={openScorecard}>Open scorecard →</button></div></div> }
 export default App
+export { Compare }
